@@ -88,7 +88,7 @@ shm_t* shinit(const char* shm_basename, size_t volume_index, size_t shm_size);
 void shclose();
 void* shmalloc(size_t size);
 void* shmemcpy(void* dest, size_t size);
-int shfree(relptr_t ptr);
+int shfree(void* ptr);
 void* shcalloc(size_t nmemb, size_t size);
 void* shrealloc(void* ptr, size_t size);
 
@@ -407,9 +407,15 @@ static size_t choose_next_volume_size(size_t new_data_size) {
 
 
 
-block_header_t* get_block(shm_t* shm, size_t cursor){
+block_header_t* get_block(shm_t* shm, ssize_t cursor){
     if (shm == NULL) {
         perror("Shared memory pool is not defined");
+        return NULL;
+    }
+
+    // This will occur when a volume is filled, it does not necessarily mean
+    // there is no space in the volume, but new space will need to be sought.
+    if (cursor == -1){
         return NULL;
     }
 
@@ -541,7 +547,7 @@ static block_header_t* split_block(shm_t* shm, block_header_t* old_block, size_t
     old_block->size = size;
 
     block_header_t* new_free_block = (block_header_t*)((char*)old_block + sizeof(block_header_t) + size);
-    size_t new_cursor = abs2vol(new_free_block, shm);
+    ssize_t new_cursor = abs2vol(new_free_block, shm);
 
     // if there is enough free space remaining to create a new block, do so
     if (remaining_free_space > sizeof(block_header_t)){
@@ -553,6 +559,7 @@ static block_header_t* split_block(shm_t* shm, block_header_t* old_block, size_t
     } else {
         old_block->size += remaining_free_space;
         memset((void*)new_free_block, 0, remaining_free_space);
+        shm->cursor = -1; 
     }
 
     pthread_rwlock_unlock(&shm->rwlock);
@@ -626,7 +633,7 @@ void* shrealloc(void* ptr, size_t size) {
     if (!ptr) return shmalloc(size);
 
     if (size == 0) {
-        shfree(abs2rel(ptr));
+        shfree(ptr);
         return NULL;
     }
 
@@ -640,7 +647,7 @@ void* shrealloc(void* ptr, size_t size) {
             pthread_rwlock_wrlock(&shm->rwlock);
             memcpy(new_ptr, ptr, blk->size);
             pthread_rwlock_unlock(&shm->rwlock);
-            shfree(abs2rel(ptr));
+            shfree(ptr);
         }
         return new_ptr;
     }
@@ -649,9 +656,13 @@ void* shrealloc(void* ptr, size_t size) {
 }
 
 
+// Free a chunk of memory. The pointer points to the start of the memory that
+// the user is given relative to the user's process. The block header is just
+// upstream of this position.
+//
 // return 0 for success
-int shfree(relptr_t ptr) {
-    block_header_t* blk = (block_header_t*)rel2abs(ptr);
+int shfree(absptr_t ptr) {
+    block_header_t* blk = (block_header_t*)(ptr - sizeof(block_header_t));
 
     if(!blk){
       perror("Out-of-bounds relative pointer");
@@ -670,6 +681,11 @@ int shfree(relptr_t ptr) {
 
     // This is an atomic operation, so no need to lock
     blk->reference_count--;
+
+    // Set memory to 0, this may be perhaps be removed in the future for
+    // performance sake, but for now it helps with diagnostics. Note that the
+    // head remains, it may be used to merge free blocks in the future.
+    memset(blk + 1, 0, blk->size);
 
     return 0;
 }
