@@ -429,21 +429,51 @@ block_header_t* get_block(shm_t* shm, ssize_t cursor){
     return blk;
 }
 
+block_header_t* scan_volume(block_header_t* blk, size_t size, char* end){
+    while ((char*)blk + sizeof(block_header_t) + size <= end) {
+        if (!blk){
+            return NULL;
+        }
+        if (blk->magic != BLK_MAGIC) {
+            fprintf(stderr, "Corrupted memory: invalid block magic\n");
+            return NULL;
+        }
+
+        // Merge all following free blocks
+        while (blk->reference_count == 0) {
+            block_header_t* next_blk = (block_header_t*)((char*)blk + sizeof(block_header_t) + blk->size);
+            
+            if ((char*)next_blk >= end || next_blk->reference_count != 0) {
+                break;
+            }
+
+            // merge the blocks
+            blk->size += sizeof(block_header_t) + next_blk->size;
+            // set the merged block to 0, this step could be skipped
+            memset(next_blk, 0, sizeof(block_header_t) + next_blk->size);
+        }
+
+        // if this block is suitable, return it
+        if (blk->reference_count == 0 && blk->size >= size) {
+            return blk;
+        }
+
+        blk = (block_header_t*)((char*)blk + sizeof(block_header_t) + blk->size);
+    }
+
+    return NULL;
+}
 
 block_header_t* find_free_block_in_volume(shm_t* shm, size_t size) {
     if (shm == NULL || size == 0) {
         return NULL;
     }
 
+    // try to get the current block at the cursor
     block_header_t* blk = get_block(shm, shm->cursor);
 
     if (blk != NULL && blk->size >= size + sizeof(block_header_t) && blk->reference_count == 0) {
         return blk;
-    }
-
-    blk = get_block(shm, 0);
-    if (blk == NULL) {
-        return NULL;
     }
 
     char* shm_end = (char*)shm + sizeof(shm_t) + shm->volume_size;
@@ -456,36 +486,17 @@ block_header_t* find_free_block_in_volume(shm_t* shm, size_t size) {
         return NULL;
     }
 
-    while ((char*)blk + sizeof(block_header_t) + size <= shm_end) {
-        if (blk->magic != BLK_MAGIC) {
-            pthread_rwlock_unlock(&shm->rwlock);
-            fprintf(stderr, "Corrupted memory: invalid block magic\n");
-            return NULL;
-        }
+    block_header_t* new_blk = scan_volume(blk, size, shm_end);
 
-        // Merge all following free blocks
-        while (blk->reference_count == 0) {
-            block_header_t* next_blk = (block_header_t*)((char*)blk + sizeof(block_header_t) + blk->size);
-            
-            if ((char*)next_blk >= shm_end || next_blk->reference_count != 0) {
-                break;
-            }
-
-            // Merge the blocks
-            blk->size += sizeof(block_header_t) + next_blk->size;
-            memset(next_blk, 0, sizeof(block_header_t) + next_blk->size);
-        }
-
-        if (blk->reference_count == 0 && blk->size >= size) {
-            pthread_rwlock_unlock(&shm->rwlock);
-            return blk;
-        }
-
-        blk = (block_header_t*)((char*)blk + sizeof(block_header_t) + blk->size);
+    if(!new_blk){
+        blk = get_block(shm, 0);
+        shm_end = (char*)shm + sizeof(shm_t) + shm->cursor;
+        new_blk = scan_volume(blk, size, shm_end);
     }
 
     pthread_rwlock_unlock(&shm->rwlock);
-    return NULL;  // No suitable space was found in this volume
+
+    return new_blk;
 }
 
 
@@ -497,8 +508,12 @@ static block_header_t* find_free_block(size_t size, shm_t** shm_ptr) {
     if (shm != NULL) {
         blk = get_block(shm, shm->cursor);
 
-        if(blk->size >= size + sizeof(block_header_t)){
-            goto success;
+        if(blk && blk->size >= size + sizeof(block_header_t)){
+            if(blk && blk->reference_count != 0){
+                perror("Bad cursor (1)");
+            } else {
+                goto success;
+            }
         }
     }
 
@@ -515,7 +530,14 @@ static block_header_t* find_free_block(size_t size, shm_t** shm_ptr) {
       }
 
       blk = find_free_block_in_volume(shm, size);
-      if(blk) goto success;
+      if(blk) {
+          if(blk->reference_count != 0){
+              perror("Bad cursor (2)");
+          } else {
+              current_volume = i;
+              goto success;
+         }
+      }
     }
 
     perror("Could not find suitable block");
@@ -574,7 +596,7 @@ void* shmalloc(size_t size) {
     if (size == 0)
         return NULL;
 
-    shm_t* shm;
+    shm_t* shm = NULL;
     // find a block with sufficient free space
     block_header_t* blk = find_free_block(size, &shm);
 
@@ -582,8 +604,13 @@ void* shmalloc(size_t size) {
     if (blk) {
         // trim the block down to size and reset the cursor to the next free block
         block_header_t* final_blk = split_block(shm, blk, size);
-        final_blk->reference_count++;
-        return (void*)(final_blk + 1);
+        if(final_blk){
+            final_blk->reference_count++;
+            return (void*)(final_blk + 1);
+        } else {
+            perror("Failed to allocate block");
+            return NULL;
+        }
     } else {
         // No suitable block found
         return NULL;
