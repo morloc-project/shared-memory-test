@@ -91,6 +91,7 @@ void* shmemcpy(void* dest, size_t size);
 int shfree(void* ptr);
 void* shcalloc(size_t nmemb, size_t size);
 void* shrealloc(void* ptr, size_t size);
+size_t total_shm_size();
 
 volptr_t rel2vol(relptr_t ptr);
 absptr_t rel2abs(relptr_t ptr);
@@ -715,6 +716,19 @@ int shfree(absptr_t ptr) {
     memset(blk + 1, 0, blk->size);
 
     return 0;
+}
+
+
+size_t total_shm_size(){
+    size_t total_size = 0;
+    shm_t* shm;
+    for(size_t i = 0; i < MAX_VOLUME_NUMBER; i++){
+        shm = volumes[i]; 
+        if(shm){
+            total_size += shm->volume_size;
+        }
+    }
+    return total_size;
 }
 
 #endif

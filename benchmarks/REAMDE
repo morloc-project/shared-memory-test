@@ -1,0 +1,9 @@
+Columns:
+ * epoch - number of sets of tests that will be run
+ * nloop - number of loops test
+ * size - bytes allocated in each loop in this test (random between 0 and size)
+ * efficiency - current allocated memory (including block headers) / sum of all volume sizes
+ * talloc - time spent allocating / nloop
+ * talloc_bytewise - time allocating / nloop / size / 2
+ * tfree - time spent freeing / nloop
+ * tfree_byte - time freeing / nloop / size / 2
